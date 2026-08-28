@@ -1,0 +1,193 @@
+# ============================================================
+# Configuração Exemplo - Pipeline "Auto Video Producer"
+# Copie este arquivo para config.yaml e preencha suas chaves
+# ============================================================
+
+paths:
+  root: "."                    # raiz do projeto (onde está este arquivo)
+  input_audio: "input/audio"           # áudios de narração pré-gravados (opcional)
+  input_textos: "input/textos"         # textos para gerar áudio (TTS)
+  input_thumbs: "input/thumbs"         # thumbnails customizadas
+  processed_audio: "processados/audio" # áudios já processados
+  assets_videos: "assets/videos"       # biblioteca de vídeos de fundo
+  assets_musicas: "assets/musicas"     # biblioteca de músicas de fundo
+  assets_fontes: "assets/fontes"       # fontes (.ttf/.otf)
+  assets_overlays: "assets/overlays"   # overlays/imagens fixas
+  assets_logo: "assets/logo"           # logo do canal
+  database: "database/videos.db"       # banco SQLite
+  cache: "cache"                       # cache temporário
+  output_videos: "output/videos"       # vídeos horizontais finais
+  output_shorts: "output/shorts"       # vídeos verticais (Shorts) finais
+  logs: "logs"                         # logs de execução
+
+# ============================================================
+# MARCA (whitelabel) — personaliza interface, overlay e rodapé
+# Troque estes valores pelo nome/slogan do SEU canal.
+# ============================================================
+brand:
+  name: "Auto Video Producer"          # nome do canal/projeto (janela, rodapé, overlay)
+  tagline: "Painel de controle do pipeline"  # texto abaixo do nome na barra superior
+  icon: "🎬"                           # ícone da barra superior (vazio = nenhum)
+
+video:
+  standard_width: 1080
+  standard_height: 1920
+  standard_fps: 30
+  codec: "h264_nvenc"          # use "libx264" se não tiver GPU NVIDIA
+  pixel_format: "yuv420p"
+  profile: "high"
+  export_bitrate: "12M"
+  export_bitrate_min: "10M"
+  export_bitrate_max: "16M"
+  audio_codec: "aac"
+  audio_bitrate: "192k"
+
+selection:
+  pool_size: 20
+
+background_composition:
+  min_clip_seconds: 5
+  max_clip_seconds: 10
+  max_clips: 8
+
+color_correction:
+  contrast: 1.05
+  saturation: 1.08
+  temperature: "warm"
+  vignette: true
+
+camera_movement:
+  options:
+    - "zoom_in"
+    - "zoom_out"
+    - "pan_left_right"
+    - "pan_right_left"
+    - "pan_bottom_top"
+    - "pan_top_bottom"
+  intensity: "subtle"
+
+audio_mix:
+  narrator_db: 0
+  music_db: -28.0
+  fade_in_seconds: 2
+  fade_out_seconds: 3
+
+# Overlay da marca no canto do vídeo (whitelabel).
+# `text` vazio/ausente usa brand.name; se existir assets/logo/*, a imagem
+# tem prioridade sobre o texto.
+overlay:
+  text: "Auto Video Producer"
+  position: "bottom_right"
+  opacity: 0.25
+  margin: 40
+  font_size: 28
+
+# Tela final (CTA) — adapte as linhas ao seu canal/idioma.
+final_screen:
+  duration_seconds: 8
+  lines:
+    - "🔔 Inscreva-se no canal"
+    - "❤️ Deixe seu like nos comentários"
+    - "🔔 Ative o sininho para não perder"
+    - "📤 Compartilhe este vídeo"
+  fade_seconds: 1
+
+# Thumbnail automática (pule se existir input/thumbs/<nome do áudio>.jpg)
+thumbnail:
+  enabled: true
+  candidate_frames: 8
+  preferred_keywords:
+    - "natureza"
+    - "cidade"
+    - "tecnologia"
+    - "pessoas"
+
+# ============================================================
+# CLASSIFICAÇÃO DE TEMA (OpenAI-compatible API)
+# Temas/chaves são 100% do usuário: adicione, remova ou edite
+# conforme o assunto do seu canal. Fallback por palavras-chave
+# funciona mesmo sem chave de API.
+# ============================================================
+classification:
+  enabled: true
+  provider: "openai_compatible"   # usa endpoint compatível OpenAI (OpenRouter, Groq, Together, etc.)
+  endpoint: "https://openrouter.ai/api/v1/chat/completions"  # ou seu endpoint
+  api_key: "SUA_API_KEY_AQUI"
+  model: "anthropic/claude-3.5-sonnet"  # modelo para classificação
+  timeout_seconds: 30
+  themes:
+    natureza:
+      keywords: ["natureza", "floresta", "mar", "montanha", "rio", "praia", "céu", "sol", "árvore", "verde"]
+      categories: ["natureza", "agua", "ceu"]
+    tecnologia:
+      keywords: ["tecnologia", "IA", "inteligência artificial", "programação", "código", "software", "digital", "futuro", "inovação", "tech"]
+      categories: ["tecnologia", "cidade", "abstrato"]
+    motivacao:
+      keywords: ["motivação", "sucesso", "disciplina", "foco", "objetivo", "meta", "conquista", "vitória", "superação", "determinação"]
+      categories: ["pessoas", "cidade", "natureza"]
+    educacao:
+      keywords: ["aprender", "estudo", "educação", "conhecimento", "curso", "aula", "dica", "tutorial", "como fazer", "explicação"]
+      categories: ["pessoas", "tecnologia", "escritorio"]
+    financas:
+      keywords: ["dinheiro", "investimento", "finanças", "renda", "economia", "bitcoin", "crypto", "bolsa", "poupança", "riqueza"]
+      categories: ["cidade", "tecnologia", "escritorio"]
+    saude:
+      keywords: ["saúde", "exercício", "treino", "dieta", "bem-estar", "mental", "ansiedade", "estresse", "meditação", "yoga"]
+      categories: ["natureza", "pessoas", "casa"]
+    entretenimento:
+      keywords: ["diversão", "jogo", "filme", "série", "música", "humor", "curiosidade", "história", "fato", "entretenimento"]
+      categories: ["pessoas", "cidade", "abstrato"]
+    viagem:
+      keywords: ["viagem", "turismo", "destino", "país", "cidade", "hotel", "passagem", "mochila", "aventura", "explorar"]
+      categories: ["cidade", "natureza", "pessoas"]
+    culinaria:
+      keywords: ["receita", "cozinha", "comida", "prato", "ingrediente", "chef", "restaurante", "sabor", "culinária", "gastronomia"]
+      categories: ["casa", "pessoas", "natureza"]
+  default_categories: ["natureza", "cidade", "pessoas"]  # usadas quando não há texto
+
+# ============================================================
+# TEXT-TO-SPEECH (OmniVoice)
+# ============================================================
+tts:
+  provider: "omnivoice"          # "omnivoice" ou "edge" (fallback)
+  omnivoice:
+    model_path: ""               # deixe vazio para download automático do HF
+    voice_preset: "default"      # ou caminho para .npz de voice design
+    speed: 1.0
+    temperature: 0.7
+    top_p: 0.9
+    device: "auto"               # "cuda", "cpu", "auto"
+    compile: true                # torch.compile para velocidade
+  edge:
+    voice: "pt-BR-AntonioNeural"      # qualquer locale suportada pelo Edge TTS
+    rate: "+0%"
+    volume: "+0%"
+
+# ============================================================
+# LLM PARA GERAÇÃO DE ROTEIRO (OpenAI-compatible)
+# ============================================================
+llm:
+  provider: "openai_compatible"
+  endpoint: "https://openrouter.ai/api/v1/chat/completions"
+  api_key: "SUA_API_KEY_AQUI"
+  model: "anthropic/claude-3.5-sonnet"
+  temperature: 0.7
+  max_tokens: 2000
+  timeout_seconds: 60
+
+# ============================================================
+# UPLOAD YOUTUBE (OAuth2)
+# ============================================================
+youtube:
+  client_secrets_file: "client_secrets.json"
+  token_file: "token.json"
+  channel_id: ""                 # opcional
+
+watcher:
+  poll_interval_seconds: 5
+  file_pattern: "*.wav"
+
+logging:
+  level: "INFO"
+  rotation: "10 MB"
+  retention: "30 days"

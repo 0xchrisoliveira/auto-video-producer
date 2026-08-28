@@ -1,0 +1,16 @@
+Bem-vindo ao Auto Video Producer!
+
+Este é um exemplo de texto para testar o pipeline de geração de vídeo a partir de texto.
+
+O sistema converte este texto em narração usando TTS (OmniVoice ou Edge TTS) e depois monta o vídeo automaticamente:
+
+- vídeos de fundo escolhidos pelo tema do texto
+- música ambiente mixada com a narração
+- overlay da marca e tela final com call-to-action
+- thumbnail gerada a partir do frame mais nítido
+
+Copie este arquivo para input/textos/ ou rode direto:
+
+    python main.py run-text examples/roteiro_exemplo.txt
+
+O idioma, a voz e a velocidade da narração são configurados em tts.* dentro do config.yaml — troque para o idioma do seu canal.

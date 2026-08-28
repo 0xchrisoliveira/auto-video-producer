@@ -1,0 +1,100 @@
+"""
+core.audio_analysis
+=====================
+ETAPA 2 - Análise da narração.
+Extrai duração, sample rate, bitrate, canais e loudness (via filtro
+loudnorm em modo de medição, padrão EBU R128) usando ffprobe/ffmpeg.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+from loguru import logger
+
+
+@dataclass
+class AudioInfo:
+    path: Path
+    duration: float
+    sample_rate: int
+    bitrate: int
+    channels: int
+    integrated_loudness: float | None  # LUFS
+    true_peak: float | None
+    loudness_range: float | None
+
+
+def _run_ffprobe(path: Path) -> dict:
+    cmd = [
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-show_format", "-show_streams", str(path),
+    ]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)
+
+
+def _measure_loudness(path: Path) -> dict:
+    """Usa o filtro loudnorm do ffmpeg em modo de análise (print_format json)
+    para medir loudness integrada, true peak e loudness range, seguindo o
+    padrão EBU R128."""
+    cmd = [
+        "ffmpeg", "-i", str(path), "-af",
+        "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    stderr = result.stderr
+
+    match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", stderr, re.DOTALL)
+    if not match:
+        logger.warning("Não foi possível medir loudness de {}", path)
+        return {}
+    try:
+        data = json.loads(match.group(0))
+        return {
+            "integrated_loudness": float(data.get("input_i", "nan")),
+            "true_peak": float(data.get("input_tp", "nan")),
+            "loudness_range": float(data.get("input_lra", "nan")),
+        }
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def analyze_narration(path: Path) -> AudioInfo:
+    logger.info("Analisando narração: {}", path)
+    probe = _run_ffprobe(path)
+    fmt = probe.get("format", {})
+    duration = float(fmt.get("duration", 0.0) or 0.0)
+    bitrate = int(fmt.get("bit_rate", 0) or 0)
+
+    sample_rate = 0
+    channels = 0
+    for stream in probe.get("streams", []):
+        if stream.get("codec_type") == "audio":
+            sample_rate = int(stream.get("sample_rate", 0) or 0)
+            channels = int(stream.get("channels", 0) or 0)
+            break
+
+    loudness = _measure_loudness(path)
+
+    info = AudioInfo(
+        path=path,
+        duration=duration,
+        sample_rate=sample_rate,
+        bitrate=bitrate,
+        channels=channels,
+        integrated_loudness=loudness.get("integrated_loudness"),
+        true_peak=loudness.get("true_peak"),
+        loudness_range=loudness.get("loudness_range"),
+    )
+    logger.info(
+        "Áudio: {:.2f}s | {} Hz | {} canais | {:.1f} LUFS",
+        info.duration, info.sample_rate, info.channels,
+        info.integrated_loudness if info.integrated_loudness is not None else -99.0,
+    )
+    return info
