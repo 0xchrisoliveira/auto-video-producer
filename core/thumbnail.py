@@ -105,15 +105,30 @@ def compose_thumbnail(cfg: Config, frame_path: Path, title_text: str,
         y = h - gradient_height + i
         draw.line([(0, y), (w, y)], fill=(0, 0, 0, alpha))
 
-    font = _load_font(cfg, int(h * 0.08))
+    font_size = int(h * 0.08)
+    font = _load_font(cfg, font_size)
+    # reduz a fonte até o título caber na largura da imagem (títulos
+    # longos estouravam a margem e ficavam ilegíveis/cortados)
+    while font_size > 12:
+        bbox = draw.textbbox((0, 0), title_text, font=font)
+        if (bbox[2] - bbox[0]) <= w * 0.9:
+            break
+        font_size = int(font_size * 0.9)
+        font = _load_font(cfg, font_size)
+    else:
+        # fonte bitmap (load_default) não escala: corta o texto mesmo
+        while title_text and (draw.textbbox((0, 0), title_text, font=font)[2] > w * 0.9):
+            title_text = title_text[:-1]
+
     bbox = draw.textbbox((0, 0), title_text, font=font)
     text_w = bbox[2] - bbox[0]
     x = (w - text_w) / 2
     y = h - gradient_height * 0.6
 
     # contorno preto + texto branco para legibilidade
-    for dx in (-3, 0, 3):
-        for dy in (-3, 0, 3):
+    stroke = max(2, font_size // 12)
+    for dx in (-stroke, 0, stroke):
+        for dy in (-stroke, 0, stroke):
             draw.text((x + dx, y + dy), title_text, font=font, fill=(0, 0, 0, 255))
     draw.text((x, y), title_text, font=font, fill=(255, 255, 255, 255))
 

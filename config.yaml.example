@@ -36,9 +36,11 @@ video:
   codec: "h264_nvenc"          # use "libx264" se não tiver GPU NVIDIA
   pixel_format: "yuv420p"
   profile: "high"
+  # Alvo de qualidade da exportação final (+ limites min/max opcionais)
   export_bitrate: "12M"
-  export_bitrate_min: "10M"
-  export_bitrate_max: "16M"
+  export_bitrate_min: "10M"    # vazio ("") = sem limite (limite suave:
+  export_bitrate_max: "16M"    # conteúdo fácil pode ficar abaixo do mínimo)
+  export_bitrate_bufsize: ""   # janela VBV; vazio = usa export_bitrate
   audio_codec: "aac"
   audio_bitrate: "192k"
 
@@ -53,7 +55,7 @@ background_composition:
 color_correction:
   contrast: 1.05
   saturation: 1.08
-  temperature: "warm"
+  temperature: 1.0            # -1.0 (frio) .. 0.0 (neutro) .. +1.0 (quente)
   vignette: true
 
 camera_movement:
@@ -64,20 +66,29 @@ camera_movement:
     - "pan_right_left"
     - "pan_bottom_top"
     - "pan_top_bottom"
-  intensity: "subtle"
+  intensity: 1.0              # 0.0 (parado) .. 1.0 (padrão) .. 2.0 (dobro do movimento)
+                              # aliases aceitos: "subtle", "normal", "strong"
 
 audio_mix:
   narrator_db: 0
   music_db: -28.0
   fade_in_seconds: 2
   fade_out_seconds: 3
+  # Normalização de loudness da narração (EBU R128) para volume constante
+  # entre vídeos, aplicada com ganho linear a partir da medição da ETAPA 2.
+  normalize_loudness: true
+  target_lufs: -16            # alvo de loudness integrada (YouTube: -14 a -16)
+  target_tp: -1.5             # teto de true peak (dBTP)
 
-# Overlay da marca no canto do vídeo (whitelabel).
+# Overlay da marca no vídeo (whitelabel).
 # `text` vazio/ausente usa brand.name; se existir assets/logo/*, a imagem
-# tem prioridade sobre o texto.
+# tem prioridade sobre o texto. Deixe text vazio e remova o logo para
+# não desenhar overlay nenhum.
 overlay:
   text: "Auto Video Producer"
-  position: "bottom_right"
+  position: "bottom-right"    # top-left, top-center, top-right, center-left,
+                              # center, center-right, bottom-left,
+                              # bottom-center (default), bottom-right
   opacity: 0.25
   margin: 40
   font_size: 28
@@ -95,12 +106,7 @@ final_screen:
 # Thumbnail automática (pule se existir input/thumbs/<nome do áudio>.jpg)
 thumbnail:
   enabled: true
-  candidate_frames: 8
-  preferred_keywords:
-    - "natureza"
-    - "cidade"
-    - "tecnologia"
-    - "pessoas"
+  candidate_frames: 8          # frames avaliados (o mais nítido/claro vence)
 
 # ============================================================
 # CLASSIFICAÇÃO DE TEMA (OpenAI-compatible API)
@@ -112,9 +118,11 @@ classification:
   enabled: true
   provider: "openai_compatible"   # usa endpoint compatível OpenAI (OpenRouter, Groq, Together, etc.)
   endpoint: "https://openrouter.ai/api/v1/chat/completions"  # ou seu endpoint
-  api_key: "SUA_API_KEY_AQUI"
+  # Dica de segurança: deixe a chave fora do arquivo com ${VAR}
+  api_key: "${OPENROUTER_API_KEY}"   # valor literal "SUA_API_KEY_AQUI" = desligado
   model: "anthropic/claude-3.5-sonnet"  # modelo para classificação
   timeout_seconds: 30
+  min_confidence: 0.5          # abaixo disso, cai para o fallback por palavras-chave
   themes:
     natureza:
       keywords: ["natureza", "floresta", "mar", "montanha", "rio", "praia", "céu", "sol", "árvore", "verde"]
@@ -164,16 +172,22 @@ tts:
     volume: "+0%"
 
 # ============================================================
-# LLM PARA GERAÇÃO DE ROTEIRO (OpenAI-compatible)
+# LLM PARA GERAÇÃO DE ROTEIRO (`python main.py generate "<tópico>"`)
+# Usa a mesma ideia da classificação: endpoint compatível OpenAI.
+# Mantenha a chave em variável de ambiente (${MINHA_CHAVE}).
 # ============================================================
 llm:
   provider: "openai_compatible"
   endpoint: "https://openrouter.ai/api/v1/chat/completions"
-  api_key: "SUA_API_KEY_AQUI"
+  api_key: "${OPENROUTER_API_KEY}"
   model: "anthropic/claude-3.5-sonnet"
   temperature: 0.7
   max_tokens: 2000
   timeout_seconds: 60
+  language: "pt-BR"             # idioma do roteiro gerado
+  target_seconds: 60            # duração alvo da narração (0 = não sugerir)
+  output_dir: "input/textos"    # onde o .txt é gravado
+  # system_prompt: ""           # opcional: sobrescreve as instruções padrão
 
 # ============================================================
 # UPLOAD YOUTUBE (OAuth2)

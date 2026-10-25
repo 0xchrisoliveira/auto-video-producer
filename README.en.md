@@ -32,6 +32,7 @@ identity (name, logo, CTA copy, themes, asset categories) lives in
 - [Whitelabel customization](#whitelabel-customization)
 - [Colab notebooks](#colab-notebooks)
 - [Troubleshooting](#troubleshooting)
+- [Security](#security)
 - [Contributing](#contributing)
 
 ## Screenshots
@@ -73,7 +74,8 @@ flowchart LR
    available in the SQLite database.
 6. **Editing** — resolution normalization, segment cuts, camera motion and
    color correction.
-7. **Audio** — narration + ambient music mix with fades.
+7. **Audio** — narration + ambient music mix with fades and **loudness
+   normalization** (EBU R128 → −16 LUFS) so every video plays at the same level.
 8. **Composition** — brand overlay, final CTA screen and export (`libx264` or
    `h264_nvenc`).
 9. **Thumbnail** — sharpest frame + title, or your own image from `input/thumbs/`.
@@ -112,7 +114,9 @@ cp config.yaml.example config.yaml
 ```
 
 `config.yaml` is **not tracked** (it is in `.gitignore`): every clone keeps its
-own file, so keys can never leak.
+own file, so keys can never leak. API keys accept environment variables —
+`api_key: "${OPENROUTER_API_KEY}"` — and the pipeline warns if the file holds a
+real secret while being readable by other system users.
 
 Main blocks:
 
@@ -120,12 +124,15 @@ Main blocks:
 | --- | --- |
 | `brand` | Name, tagline and icon shown in the GUI and overlay |
 | `paths` | Inputs, assets, outputs and logs locations |
-| `video` | Resolution, FPS, bitrate and codec (`h264_nvenc` or `libx264`) |
-| `overlay` | Brand text/opacity over the video (uses the logo if present) |
+| `video` | Resolution, FPS, bitrate (`export_bitrate` + min/max limits) and codec (`h264_nvenc` or `libx264`) |
+| `overlay` | Brand text, position (`overlay.position`), opacity and margin (uses the logo if present) |
+| `audio_mix` | Levels, fades and loudness normalization (`target_lufs`) |
+| `camera_movement` | Motion presets and `intensity` (0 = still … 2 = double) |
+| `color_correction` | Contrast, saturation, `temperature` (−1 cool … +1 warm) and vignette |
 | `final_screen` | CTA lines on the end screen |
-| `classification` | Themes, keywords, categories and LLM endpoint |
+| `classification` | Themes, keywords, categories, LLM endpoint and `min_confidence` |
 | `tts` | Engine (`omnivoice` or `edge`), voice and speed |
-| `llm` | Endpoint for script generation (optional) |
+| `llm` | Endpoint for `main.py generate` (script generation, optional) |
 | `youtube` | OAuth2 files for upload (extension point) |
 
 Example of branding and classification:
@@ -139,8 +146,9 @@ brand:
 classification:
   enabled: true
   endpoint: "https://openrouter.ai/api/v1/chat/completions"
-  api_key: "YOUR_API_KEY"
+  api_key: "${OPENROUTER_API_KEY}"   # keys stay out of the file, via env
   model: "anthropic/claude-3.5-sonnet"
+  min_confidence: 0.5
   themes:
     cooking:
       keywords: ["recipe", "kitchen", "ingredient"]
@@ -164,6 +172,10 @@ python main.py run-text examples/roteiro_exemplo.txt
 
 # Full pipeline from a pre-recorded audio file
 python main.py run input/audio/my_narration.wav
+
+# Generate a .txt script with the LLM (llm.* section), then process it
+python main.py generate "how to save energy at home"
+python main.py run-text input/textos/how_to_save_energy_at_home.txt
 
 # Index/refresh the asset library
 python main.py scan
@@ -192,8 +204,9 @@ auto-video-producer/
 │   ├── pipeline.py         # Orchestrates: text/audio -> video
 │   ├── tts_engine.py       # Text-to-Speech (OmniVoice + Edge TTS)
 │   ├── classification.py   # Theme via LLM + keyword fallback
+│   ├── script_generator.py # Script via LLM (main.py generate)
 │   ├── audio_analysis.py   # Audio duration and levels
-│   ├── audio_mixer.py      # Narration + ambient music mix
+│   ├── audio_mixer.py      # Narration + music mix + LUFS normalization
 │   ├── video_processor.py  # Cuts, camera motion, color correction
 │   ├── selectors.py        # Random pick of videos/music from the DB
 │   ├── database.py         # SQLite asset and history store
@@ -209,6 +222,7 @@ auto-video-producer/
 ├── main.py                 # CLI entry point
 ├── gui.py                  # Graphical interface (Tkinter)
 ├── docs/screenshots/       # Screenshots used in this README
+├── docs/gaps-e-seguranca.md # Report: fixed gaps + security review (PT-BR)
 ├── examples/               # Sample script you can run as-is
 ├── input/                  # User inputs (not tracked)
 │   ├── audio/              # Narration .wav files
@@ -259,7 +273,6 @@ project for a new channel, change configuration and media only:
 | Backgrounds per category | folders in `assets/videos/<category>/` |
 | Background music | `assets/musicas/` |
 | Narration language / voice | `tts.edge.voice` / `tts.omnivoice` |
-| Thumbnail keywords | `thumbnail.preferred_keywords` |
 | Format (Shorts, 16:9, 1:1) | GUI → *Settings*, or `video.*` |
 | Codec / quality | `video.codec` (`libx264` without a GPU) |
 
@@ -285,6 +298,20 @@ All of them point to `/content/drive/MyDrive/auto-video-producer/`.
 | Too few background videos | Create folders under `assets/videos/<category>/` and run `main.py scan` |
 | OmniVoice will not install | Set `tts.provider: "edge"` |
 | ffmpeg not found | Install it and make sure `ffmpeg`/`ffprobe` are on your PATH |
+
+## Security
+
+- API keys come from environment variables: `api_key: "${MY_KEY}"` — the literal
+  value never has to sit in the tracked `config.yaml`.
+- The pipeline warns when `config.yaml` holds a real secret and is readable by
+  other system users (`chmod 600 config.yaml`).
+- No command is ever run through a shell; every process gets an argument list
+  and SQL uses prepared parameters.
+- The script text is passed to the LLM as **data**, never as instructions,
+  which protects theme classification against prompt injection.
+
+Details, limits and further recommendations:
+[`docs/gaps-e-seguranca.md`](docs/gaps-e-seguranca.md) *(in Portuguese)*.
 
 ## Contributing
 

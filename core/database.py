@@ -60,6 +60,14 @@ CREATE TABLE IF NOT EXISTS Projetos (
 );
 """
 
+# Migrações aditivas: rodam uma única vez e são ignoradas se a coluna já
+# existir (o SQLite lança OperationalError "duplicate column name").
+_MIGRATIONS = [
+    # usado pelo scan para detectar arquivo substituído e reexibir metadados
+    "ALTER TABLE Videos ADD COLUMN mtime REAL DEFAULT 0",
+    "ALTER TABLE Musicas ADD COLUMN mtime REAL DEFAULT 0",
+]
+
 
 @dataclass
 class VideoAsset:
@@ -101,6 +109,12 @@ class Database:
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            for statement in _MIGRATIONS:
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e).lower():
+                        logger.warning("Migração de schema falhou ({}): {}", statement, e)
         logger.debug("Schema do banco verificado/criado em {}", self.db_path)
 
     # ------------------------------------------------------------------
@@ -150,12 +164,18 @@ class Database:
     # Scan de assets -> popula Videos e Musicas
     # ------------------------------------------------------------------
     def scan_assets(self) -> None:
-        """Varre assets/videos/<categoria>/*.mp4 e assets/musicas/*.mp3
-        (ou outros formatos de mídia) e insere/atualiza no banco."""
+        """Varre assets/videos/<categoria>/* e assets/musicas/* e:
+        - insere arquivos novos;
+        - reexibe metadados de arquivos que mudaram (mtime diferente);
+        - marca como inativo o que sumiu do disco (para o pipeline nunca
+          tentar usar um arquivo que não existe mais)."""
         videos_root = self.cfg.paths["assets_videos"]
         musicas_root = self.cfg.paths["assets_musicas"]
         video_exts = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
         audio_exts = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}
+
+        seen_videos: set[str] = set()
+        seen_musicas: set[str] = set()
 
         with self._connect() as conn:
             if videos_root.exists():
@@ -167,18 +187,39 @@ class Database:
                         if file.suffix.lower() not in video_exts:
                             continue
                         rel_path = str(file.relative_to(self.cfg.project_root))
+                        seen_videos.add(rel_path)
+                        try:
+                            mtime = float(file.stat().st_mtime)
+                        except OSError:
+                            continue
+
                         existing = conn.execute(
-                            "SELECT id FROM Videos WHERE arquivo = ?", (rel_path,)
+                            "SELECT id, mtime, ativo FROM Videos WHERE arquivo = ?", (rel_path,)
                         ).fetchone()
                         if existing:
+                            if existing["ativo"] and float(existing["mtime"] or 0.0) == mtime:
+                                continue
+                            meta = self._extract_video_metadata(file)
+                            conn.execute(
+                                """UPDATE Videos SET categoria=?, duracao=?, largura=?,
+                                   altura=?, fps=?, codec=?, mtime=?, ativo=1 WHERE id=?""",
+                                (categoria, meta["duracao"], meta["largura"], meta["altura"],
+                                 meta["fps"], meta["codec"], mtime, existing["id"]),
+                            )
+                            if not existing["ativo"]:
+                                logger.info("Vídeo reativado: {}", rel_path)
+                            else:
+                                logger.info("Metadados atualizados (arquivo alterado): {}", rel_path)
                             continue
+
                         meta = self._extract_video_metadata(file)
                         conn.execute(
                             """INSERT INTO Videos
-                               (arquivo, categoria, duracao, largura, altura, fps, codec, usos, ativo)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1)""",
+                               (arquivo, categoria, duracao, largura, altura, fps, codec,
+                                usos, ativo, mtime)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, ?)""",
                             (rel_path, categoria, meta["duracao"], meta["largura"],
-                             meta["altura"], meta["fps"], meta["codec"]),
+                             meta["altura"], meta["fps"], meta["codec"], mtime),
                         )
                         logger.info("Vídeo indexado: {} [{}]", rel_path, categoria)
 
@@ -187,110 +228,198 @@ class Database:
                     if file.suffix.lower() not in audio_exts:
                         continue
                     rel_path = str(file.relative_to(self.cfg.project_root))
+                    seen_musicas.add(rel_path)
+                    try:
+                        mtime = float(file.stat().st_mtime)
+                    except OSError:
+                        continue
+
                     existing = conn.execute(
-                        "SELECT id FROM Musicas WHERE arquivo = ?", (rel_path,)
+                        "SELECT id, mtime, ativo FROM Musicas WHERE arquivo = ?", (rel_path,)
                     ).fetchone()
                     if existing:
+                        if existing["ativo"] and float(existing["mtime"] or 0.0) == mtime:
+                            continue
+                        duracao = self._extract_audio_duration(file)
+                        conn.execute(
+                            "UPDATE Musicas SET duracao=?, mtime=?, ativo=1 WHERE id=?",
+                            (duracao, mtime, existing["id"]),
+                        )
+                        logger.info("Música reativada/atualizada: {}", rel_path)
                         continue
+
                     duracao = self._extract_audio_duration(file)
                     conn.execute(
-                        """INSERT INTO Musicas (arquivo, duracao, usos, ativo)
-                           VALUES (?, ?, 0, 1)""",
-                        (rel_path, duracao),
+                        """INSERT INTO Musicas (arquivo, duracao, usos, ativo, mtime)
+                           VALUES (?, ?, 0, 1, ?)""",
+                        (rel_path, duracao, mtime),
                     )
                     logger.info("Música indexada: {}", rel_path)
+
+            # ----- arquivos que sumiram do disco -> inativos -----
+            for row in conn.execute("SELECT arquivo FROM Videos WHERE ativo = 1").fetchall():
+                if row["arquivo"] not in seen_videos:
+                    conn.execute("UPDATE Videos SET ativo = 0 WHERE arquivo = ?", (row["arquivo"],))
+                    logger.warning("Vídeo não está mais no disco; marcado como inativo: {}",
+                                   row["arquivo"])
+            for row in conn.execute("SELECT arquivo FROM Musicas WHERE ativo = 1").fetchall():
+                if row["arquivo"] not in seen_musicas:
+                    conn.execute("UPDATE Musicas SET ativo = 0 WHERE arquivo = ?", (row["arquivo"],))
+                    logger.warning("Música não está mais no disco; marcada como inativa: {}",
+                                   row["arquivo"])
 
     # ------------------------------------------------------------------
     # Seleção ponderada por menor uso (ETAPA 4 / ETAPA 9)
     # ------------------------------------------------------------------
-    def pick_least_used_video(self, categories: list[str],
-                               exclude_ids: Optional[set[int]] = None,
-                               orientation: Optional[str] = None) -> Optional[VideoAsset]:
-        """Escolhe o vídeo menos usado dentro do pool, com fallback em
-        cascata:
-        1) categoria certa + orientação certa
-        2) qualquer categoria + orientação certa
-        3) qualquer categoria + qualquer orientação (último recurso,
-           loga aviso, evita travar o pipeline por falta de asset).
+    @staticmethod
+    def _video_conditions(
+        categories: list[str],
+        exclude_ids: set[int],
+        orientation: Optional[str],
+        min_duration: float,
+        *,
+        use_categories: bool,
+        use_orientation: bool,
+        use_duration: bool,
+    ) -> tuple[str, list]:
+        """Monta WHERE + parâmetros da consulta de vídeos. Todos os valores
+        entram como parâmetro placeholder (`?`) — nenhum texto vindo de
+        arquivo/usuário é interpolado no SQL."""
+        conditions = ["ativo = 1"]
+        params: list = []
 
-        `orientation` é "vertical", "horizontal" ou None (ignora o
-        filtro). Vídeos quadrados (largura == altura) entram no pool
-        de ambas as orientações."""
+        if use_categories and categories:
+            conditions.append(f"categoria IN ({','.join('?' for _ in categories)})")
+            params.extend(categories)
+        if exclude_ids:
+            ordered = sorted(exclude_ids)
+            conditions.append(f"id NOT IN ({','.join('?' for _ in ordered)})")
+            params.extend(ordered)
+        if use_orientation and orientation == "vertical":
+            conditions.append("altura >= largura")
+        elif use_orientation and orientation == "horizontal":
+            conditions.append("largura >= altura")
+        if use_duration and min_duration > 0:
+            conditions.append("duracao >= ?")
+            params.append(float(min_duration))
+
+        return " AND ".join(conditions), params
+
+    # Cascata de relaxamento: cada passo abre mão de um critério em vez de
+    # jogar tudo para "qualquer vídeo" de uma vez só.
+    _VIDEO_CASCADE = (
+        ("categoria + orientação + duração", True, True, True),
+        ("categoria + orientação", True, True, False),
+        ("categoria + duração", True, False, True),
+        ("categoria", True, False, False),
+        ("orientação + duração", False, True, True),
+        ("orientação", False, True, False),
+        ("duração", False, False, True),
+        ("qualquer vídeo", False, False, False),
+    )
+
+    def pick_least_used_video(self, categories: list[str],
+                              exclude_ids: Optional[set[int]] = None,
+                              orientation: Optional[str] = None,
+                              min_duration: float = 0.0) -> Optional[VideoAsset]:
+        """Escolhe o vídeo menos usado dentro do pool, relaxando os
+        critérios aos poucos (categoria, orientação e duração).
+
+        `min_duration` é a duração necessária do trecho: prioriza vídeos
+        longos o bastante para cobri-lo sem entrar em loop (loop curto
+        repetitivo piora o resultado). Só cai para vídeos mais curtos
+        quando não há outra opção na biblioteca."""
         pool_size = self.cfg.get("selection", "pool_size", default=20)
         exclude_ids = exclude_ids or set()
-        exclude_clause = ""
-        exclude_params: tuple = ()
-        if exclude_ids:
-            exclude_clause = f" AND id NOT IN ({','.join('?' for _ in exclude_ids)})"
-            exclude_params = tuple(exclude_ids)
+        last_index = len(self._VIDEO_CASCADE) - 1
 
-        orientation_clause = ""
-        if orientation == "vertical":
-            orientation_clause = " AND altura >= largura"
-        elif orientation == "horizontal":
-            orientation_clause = " AND largura >= altura"
-
-        placeholders = ",".join("?" for _ in categories)
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"""SELECT * FROM Videos
-                    WHERE ativo = 1 AND categoria IN ({placeholders}){exclude_clause}{orientation_clause}
-                    ORDER BY usos ASC, ultima_utilizacao ASC NULLS FIRST
-                    LIMIT ?""",
-                (*categories, *exclude_params, pool_size),
-            ).fetchall()
-
-            if not rows and orientation_clause:
-                # sem vídeo na orientação certa dentro da categoria certa;
-                # tenta a orientação certa em qualquer categoria
+        for index, (label, use_cat, use_orient, use_dur) in enumerate(self._VIDEO_CASCADE):
+            where, params = self._video_conditions(
+                categories, exclude_ids, orientation, min_duration,
+                use_categories=use_cat, use_orientation=use_orient, use_duration=use_dur,
+            )
+            with self._connect() as conn:
                 rows = conn.execute(
-                    f"""SELECT * FROM Videos WHERE ativo = 1{exclude_clause}{orientation_clause}
-                       ORDER BY usos ASC LIMIT ?""",
-                    (*exclude_params, pool_size),
+                    f"""SELECT * FROM Videos WHERE {where}
+                        ORDER BY usos ASC, ultima_utilizacao ASC NULLS FIRST
+                        LIMIT ?""",
+                    (*params, pool_size),
                 ).fetchall()
 
             if not rows:
-                # último recurso: qualquer vídeo ativo, independente de
-                # categoria e orientação (evita travar o pipeline; se
-                # isso acontecer, provavelmente falta asset na
-                # orientação desejada na biblioteca)
-                if orientation_clause:
+                continue
+
+            if index > 0:
+                if index == last_index:
                     logger.warning(
-                        "Nenhum vídeo na orientação '{}' disponível (mesmo fora da "
-                        "categoria); caindo para qualquer orientação como último recurso.",
-                        orientation,
+                        "Selecionando sem nenhum critério; revise a biblioteca de assets "
+                        "(categoria/orientação/duração).",
                     )
-                rows = conn.execute(
-                    f"""SELECT * FROM Videos WHERE ativo = 1{exclude_clause}
-                       ORDER BY usos ASC LIMIT ?""",
-                    (*exclude_params, pool_size),
-                ).fetchall()
+                else:
+                    logger.info("Sem opções no critério anterior; usando '{}'.", label)
 
-            if not rows:
-                return None
             chosen = random.choice(rows)
             return VideoAsset(
                 id=chosen["id"], arquivo=chosen["arquivo"], categoria=chosen["categoria"],
                 duracao=chosen["duracao"], largura=chosen["largura"], altura=chosen["altura"],
                 fps=chosen["fps"], codec=chosen["codec"], usos=chosen["usos"],
             )
+        return None
+
+    def count_available_videos(self, categories: Optional[list[str]] = None,
+                               orientation: Optional[str] = None,
+                               min_duration: float = 0.0) -> int:
+        """Quantos vídeos ativos atendem aos critérios. O pipeline usa isso
+        para limitar o número de trechos ao que a biblioteca suporta,
+        evitando repetir o mesmo clipe várias vezes no mesmo vídeo."""
+        where, params = self._video_conditions(
+            list(categories or []), set(), orientation, min_duration,
+            use_categories=bool(categories), use_orientation=orientation is not None,
+            use_duration=min_duration > 0,
+        )
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS total FROM Videos WHERE {where}", params
+            ).fetchone()
+        return int(row["total"])
 
     def pick_least_used_music(self, min_duration: float = 0.0) -> Optional[MusicAsset]:
+        """Escolhe a música menos usada, preferindo uma com duração >=
+        `min_duration` (evita loop audível da trilha). Se não houver
+        nenhuma longa o bastante, cai para qualquer uma — a mixagem
+        faz loop automático até cobrir a narração."""
         pool_size = self.cfg.get("selection", "pool_size", default=20)
-        with self._connect() as conn:
-            rows = conn.execute(
-                """SELECT * FROM Musicas WHERE ativo = 1
-                   ORDER BY usos ASC, ultima_utilizacao ASC NULLS FIRST
-                   LIMIT ?""",
-                (pool_size,),
-            ).fetchall()
+
+        for use_duration in (True, False):
+            conditions = ["ativo = 1"]
+            params: list = []
+            if use_duration and min_duration > 0:
+                conditions.append("duracao >= ?")
+                params.append(float(min_duration))
+
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""SELECT * FROM Musicas WHERE {' AND '.join(conditions)}
+                        ORDER BY usos ASC, ultima_utilizacao ASC NULLS FIRST
+                        LIMIT ?""",
+                    (*params, pool_size),
+                ).fetchall()
+
             if not rows:
-                return None
+                continue
+
+            if not use_duration and min_duration > 0:
+                logger.warning(
+                    "Nenhuma música cobre {:.0f}s; usando uma mais curta (a mixagem faz "
+                    "loop). Acrescente trilhas mais longas em assets/musicas/ para evitar "
+                    "repetição.", min_duration,
+                )
             chosen = random.choice(rows)
             return MusicAsset(
                 id=chosen["id"], arquivo=chosen["arquivo"],
                 duracao=chosen["duracao"], usos=chosen["usos"],
             )
+        return None
 
     def increment_video_usage(self, video_id: int) -> None:
         with self._connect() as conn:
@@ -298,6 +427,16 @@ class Database:
                 "UPDATE Videos SET usos = usos + 1, ultima_utilizacao = ? WHERE id = ?",
                 (datetime.now().isoformat(), video_id),
             )
+
+    def mark_video_inactive(self, video_id: int) -> None:
+        """Marca um asset cujo arquivo não existe mais no disco."""
+        with self._connect() as conn:
+            conn.execute("UPDATE Videos SET ativo = 0 WHERE id = ?", (video_id,))
+
+    def mark_music_inactive(self, music_id: int) -> None:
+        """Marca uma trilha cujo arquivo não existe mais no disco."""
+        with self._connect() as conn:
+            conn.execute("UPDATE Musicas SET ativo = 0 WHERE id = ?", (music_id,))
 
     def increment_music_usage(self, music_id: int) -> None:
         with self._connect() as conn:

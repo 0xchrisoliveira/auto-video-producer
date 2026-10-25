@@ -24,10 +24,16 @@ def _format_value(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     text = str(value)
+    if any(ch in text for ch in ("\n", "\r", "\t")):
+        # Quebras de linha em um valor escrito linha a linha injetariam
+        # chaves novas no YAML (ex.: valor "abc\napi_key: vazado").
+        raise ValueError(
+            "Valor com quebra de linha/tab não é aceito ao editar o config.yaml."
+        )
     if re.match(r"^[A-Za-z0-9_./\-]+$", text):
         return text
     # precisa de aspas (contém espaços, acentos, símbolos etc.)
-    escaped = text.replace('"', '\\"')
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
 

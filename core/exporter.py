@@ -10,8 +10,8 @@ Combina em uma única passagem final de ffmpeg:
   - a tela final de CTA nos últimos segundos (ETAPA 12)
   - a trilha de áudio final (narração + música, ETAPA 9)
 
-Exporta em MP4 / H264 High Profile / AAC, 1920x1080, conforme
-especificado na ETAPA 14 do planejamento.
+Exporta em MP4 / H264 High Profile / AAC, na resolução configurada em
+`video.*` (padrão 1080x1920), conforme especificado na ETAPA 14.
 """
 
 from __future__ import annotations
@@ -44,12 +44,14 @@ def compose_and_export(
     narration_duration: float,
     output_path: Path,
 ) -> None:
-    w = cfg.get("video", "standard_width", default=1920)
-    h = cfg.get("video", "standard_height", default=1080)
+    w = cfg.get("video", "standard_width", default=1080)
+    h = cfg.get("video", "standard_height", default=1920)
     codec = cfg.get("video", "codec", default="libx264")
     pix_fmt = cfg.get("video", "pixel_format", default="yuv420p")
     profile = cfg.get("video", "profile", default="high")
     bitrate = cfg.get("video", "export_bitrate", default="18M")
+    bitrate_min = cfg.get("video", "export_bitrate_min", default="")
+    bitrate_max = cfg.get("video", "export_bitrate_max", default="")
     audio_codec = cfg.get("video", "audio_codec", default="aac")
     audio_bitrate = cfg.get("video", "audio_bitrate", default="192k")
     fps = cfg.get("video", "standard_fps", default=30)
@@ -69,6 +71,8 @@ def compose_and_export(
         current_label = "v_sub"
 
     # -------- Overlay do canal (ETAPA 11) --------
+    # Sem logo e sem texto -> não desenha nada (evita drawtext vazio).
+    overlay_text_file: Optional[Path] = None
     if overlay_plan.logo_path is not None:
         inputs += ["-i", str(overlay_plan.logo_path)]
         logo_label = f"{next_input_index}:v"
@@ -77,16 +81,23 @@ def compose_and_export(
             build_logo_filter(overlay_plan, logo_label, current_label, "v_overlay")
         )
         current_label = "v_overlay"
-    else:
+    elif overlay_plan.text.strip():
         font_file = None
         fontes_dir = cfg.paths["assets_fontes"]
         if fontes_dir.exists():
-            ttfs = list(fontes_dir.glob("*.ttf"))
+            ttfs = sorted(fontes_dir.glob("*.ttf"))
             font_file = ttfs[0] if ttfs else None
+        # texto vai em arquivo: vírgulas, aspas, %, ':' e emojis não
+        # quebram a sintaxe do filtro drawtext
+        overlay_text_file = output_path.with_name(output_path.stem + "_overlay.txt")
+        overlay_text_file.write_text(overlay_plan.text, encoding="utf-8")
         filter_parts.append(
-            build_text_filter(overlay_plan, current_label, "v_overlay", font_file)
+            build_text_filter(overlay_plan, current_label, "v_overlay",
+                              font_file, text_file=overlay_text_file)
         )
         current_label = "v_overlay"
+    else:
+        logger.info("Overlay desabilitado; seguindo sem marca no vídeo.")
 
     # -------- Tela final de CTA (ETAPA 12) --------
     if final_screen_image_path is not None and final_screen_image_path.exists():
@@ -122,11 +133,32 @@ def compose_and_export(
         "-b:v", bitrate,
         "-c:a", audio_codec,
         "-b:a", audio_bitrate,
-        "-shortest",
+        # Duração exata da narração: a imagem da tela final entra com
+        # `-loop 1` (stream infinito) e, sem um -t explícito, o ffmpeg
+        # encerrava o vídeo mais longo que o áudio.
+        "-t", f"{narration_duration:.3f}",
         "-movflags", "+faststart",
         str(output_path),
     ]
+    # limites de bitrate (config opcionais). Observação: em conteúdo muito
+    # comprimível o encoder pode ficar abaixo de -minrate — é um limite
+    # suave, não uma garantia de tamanho mínimo.
+    if str(bitrate_max).strip():
+        args[-1:-1] = ["-maxrate", str(bitrate_max).strip()]
+    if str(bitrate_min).strip():
+        args[-1:-1] = ["-minrate", str(bitrate_min).strip()]
+    bufsize = str(cfg.get("video", "export_bitrate_bufsize", default="") or "").strip()
+    if bufsize:
+        args[-1:-1] = ["-bufsize", bufsize]
+    elif str(bitrate_max).strip():
+        # sem -bufsize, -maxrate tem efeito limitado: usa o nominal
+        # como janela de viés (VBV)
+        args[-1:-1] = ["-bufsize", str(bitrate)]
 
     logger.info("Iniciando exportação final -> {}", output_path)
-    run_ffmpeg(args, description="compose_and_export")
+    try:
+        run_ffmpeg(args, description="compose_and_export")
+    finally:
+        if overlay_text_file is not None:
+            overlay_text_file.unlink(missing_ok=True)
     logger.info("Exportação concluída: {}", output_path)

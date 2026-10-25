@@ -33,11 +33,11 @@ class ClipPlan:
 
 def standardize_video(cfg: Config, input_path: Path, output_path: Path) -> None:
     """ETAPA 5 (uso avulso): converte um asset para o padrão interno
-    (1920x1080, H264, 30 FPS, YUV420) sem qualquer corte ou efeito.
+    (1080x1920, H264, 30 FPS, YUV420) sem qualquer corte ou efeito.
     Útil para pré-processar a biblioteca de assets no momento da
     ingestão, deixando o pipeline principal mais rápido depois."""
-    w = cfg.get("video", "standard_width", default=1920)
-    h = cfg.get("video", "standard_height", default=1080)
+    w = cfg.get("video", "standard_width", default=1080)
+    h = cfg.get("video", "standard_height", default=1920)
     fps = cfg.get("video", "standard_fps", default=30)
     codec = cfg.get("video", "codec", default="libx264")
     pix_fmt = cfg.get("video", "pixel_format", default="yuv420p")
@@ -76,26 +76,34 @@ def _plan_clip_window(video_duration: float, narration_duration: float) -> tuple
     return start, start + narration_duration, False
 
 
-def _build_movement_filter(movement: str, duration: float, width: int, height: int) -> str:
+def _build_movement_filter(movement: str, duration: float, width: int, height: int,
+                           intensity: float = 1.0) -> str:
     """ETAPA 7 - Constrói a cadeia de filtros de crop dinâmico (com
     eval=frame) que produz um zoom ou pan lento e suave ao longo da
     duração do clipe. A imagem é previamente escalada acima do alvo
-    para dar 'espaço' de manobra ao crop."""
+    para dar 'espaça' de manobra ao crop.
+
+    `intensity` (camera_movement.intensity, 0..2) escala o quanto a
+    imagem se move: 0 = praticamente estático, 1 = padrão, 2 = duas
+    vezes mais movimento."""
+    intensity = max(0.0, min(float(intensity), 2.0))
     # fator de folga para permitir pan/zoom sem exceder as bordas
-    slack = 1.18
+    slack = 1.0 + 0.18 * max(intensity, 0.1)
+    # amplitude do zoom (fração da imagem) no movimento padrão (1.0)
+    amount = 0.08 * intensity
     work_w = int(width * slack) // 2 * 2
     work_h = int(height * slack) // 2 * 2
 
     d = max(duration, 0.1)
 
     if movement == "zoom_in":
-        # crop começa no tamanho total (work) e encolhe suavemente 8%
-        crop_w = f"iw*(1-0.08*min(t,{d})/{d})"
-        crop_h = f"ih*(1-0.08*min(t,{d})/{d})"
+        # crop começa no tamanho total (work) e encolhe suavemente
+        crop_w = f"iw*(1-{amount:.4f}*min(t,{d})/{d})"
+        crop_h = f"ih*(1-{amount:.4f}*min(t,{d})/{d})"
         x, y = "(iw-ow)/2", "(ih-oh)/2"
     elif movement == "zoom_out":
-        crop_w = f"iw*(0.92+0.08*min(t,{d})/{d})"
-        crop_h = f"ih*(0.92+0.08*min(t,{d})/{d})"
+        crop_w = f"iw*({1 - amount:.4f}+{amount:.4f}*min(t,{d})/{d})"
+        crop_h = f"ih*({1 - amount:.4f}+{amount:.4f}*min(t,{d})/{d})"
         x, y = "(iw-ow)/2", "(ih-oh)/2"
     elif movement == "pan_left_right":
         crop_w, crop_h = f"iw/{slack:.4f}", f"ih/{slack:.4f}"
@@ -124,15 +132,31 @@ def _build_movement_filter(movement: str, duration: float, width: int, height: i
 
 def _build_color_filter(cfg: Config) -> str:
     """ETAPA 8 - Correção de cor para identidade visual consistente:
-    leve contraste, saturação, temperatura quente e vinheta."""
-    contrast = cfg.get("color_correction", "contrast", default=1.05)
-    saturation = cfg.get("color_correction", "saturation", default=1.08)
-    vignette = cfg.get("color_correction", "vignette", default=True)
+    leve contraste, saturação, temperatura (color_correction.temperature,
+    -1 = bem frio ... 0 = neutro ... +1 = bem quente) e vinheta.
 
-    parts = [f"eq=contrast={contrast}:saturation={saturation}"]
-    # tom levemente quente: leve aumento no canal de vermelho/amarelo,
-    # leve redução no azul, via colorbalance (afeta sombras/meios-tons/luzes)
-    parts.append("colorbalance=rs=0.04:gs=0.01:bs=-0.04:rm=0.03:gm=0.0:bm=-0.03")
+    Aceita também os aliases de texto usados em configs antigas
+    ("warm"/"cool"/"neutral")."""
+    contrast = cfg.get_float("color_correction", "contrast", default=1.05)
+    saturation = cfg.get_float("color_correction", "saturation", default=1.08)
+    vignette = cfg.get("color_correction", "vignette", default=True)
+    temperature = cfg.get_float(
+        "color_correction", "temperature", default=1.0,
+        aliases={"warm": 1.0, "quente": 1.0, "hot": 1.0,
+                 "neutral": 0.0, "neutro": 0.0, "none": 0.0,
+                 "cool": -1.0, "cold": -1.0, "frio": -1.0},
+    )
+    temperature = max(-1.0, min(1.0, temperature))
+
+    parts = [f"eq=contrast={contrast:.4f}:saturation={saturation:.4f}"]
+    # equilíbrio de canais por faixa tonal (sombras/meios-tons/luzes),
+    # positivo = mais quente (vermelho/amarelo), negativo = mais frio (azul)
+    if abs(temperature) > 0.01:
+        parts.append(
+            "colorbalance="
+            f"rs={0.05 * temperature:.4f}:gs={0.01 * temperature:.4f}:bs={-0.05 * temperature:.4f}:"
+            f"rm={0.03 * temperature:.4f}:bm={-0.03 * temperature:.4f}"
+        )
     if vignette:
         parts.append("vignette=PI/5")
     return ",".join(parts)
@@ -140,7 +164,9 @@ def _build_color_filter(cfg: Config) -> str:
 
 def choose_movement(cfg: Config) -> str:
     options = cfg.get("camera_movement", "options", default=["zoom_in"])
-    return random.choice(options)
+    if not isinstance(options, (list, tuple)) or not options:
+        options = ["zoom_in"]
+    return random.choice(list(options))
 
 
 def plan_segment_durations(cfg: Config, narration_duration: float) -> list[float]:
@@ -223,15 +249,35 @@ def prepare_background_sequence(
             escaped = str(p.resolve()).replace("'", "'\\''")
             f.write(f"file '{escaped}'\n")
 
-    run_ffmpeg(
-        [
-            "-f", "concat", "-safe", "0", "-i", str(concat_list_path),
-            "-c:v", codec, "-pix_fmt", pix_fmt, "-r", str(fps),
-            "-an",
-            str(output_path),
-        ],
-        description="prepare_background_sequence (concat)",
-    )
+    expected_duration = float(sum(segment_durations))
+
+    def _concat(extra_args: list[str], description: str) -> None:
+        run_ffmpeg(
+            [
+                "-f", "concat", "-safe", "0", "-i", str(concat_list_path),
+                *extra_args,
+                "-an",
+                str(output_path),
+            ],
+            description=description,
+        )
+
+    # Os trechos saem todos com codec/fps/resolução idênticos: cópia
+    # direta costuma funcionar e evita um reencode completo. Se o
+    # resultado sair com duração inesperada (ou o ffmpeg falhar), cai
+    # para o reencode, que é sempre seguro.
+    try:
+        _concat(["-c:v", "copy"], "prepare_background_sequence (concat copy)")
+        actual = ffprobe_duration(output_path)
+        if abs(actual - expected_duration) > 0.5:
+            raise RuntimeError(
+                f"Concat com cópia direta gerou {actual:.2f}s (esperado "
+                f"{expected_duration:.2f}s)."
+            )
+    except Exception as e:  # noqa: BLE001 - qualquer problema -> reencode
+        logger.warning("Concat com cópia direta falhou ({}); reencodando os trechos.", e)
+        _concat(["-c:v", codec, "-pix_fmt", pix_fmt, "-r", str(fps)],
+                "prepare_background_sequence (concat reencode)")
 
     logger.info(
         "Vídeo de fundo composto por {} trecho(s) diferentes -> {}",
@@ -249,8 +295,8 @@ def prepare_background_clip(
     """Executa as ETAPAS 5-8 em uma única chamada de ffmpeg: seleciona o
     trecho, padroniza resolução/fps/codec, aplica o movimento
     cinematográfico e a correção de cor."""
-    w = cfg.get("video", "standard_width", default=1920)
-    h = cfg.get("video", "standard_height", default=1080)
+    w = cfg.get("video", "standard_width", default=1080)
+    h = cfg.get("video", "standard_height", default=1920)
     fps = cfg.get("video", "standard_fps", default=30)
     codec = cfg.get("video", "codec", default="libx264")
     pix_fmt = cfg.get("video", "pixel_format", default="yuv420p")
@@ -258,23 +304,32 @@ def prepare_background_clip(
     video_duration = ffprobe_duration(video_path)
     start, end, looped = _plan_clip_window(video_duration, narration_duration)
     movement = choose_movement(cfg)
-
-    logger.info(
-        "Preparando clipe de fundo: {} | trecho {:.2f}s -> {:.2f}s | movimento={} | loop={}",
-        video_path.name, start, end, movement, looped,
+    intensity = cfg.get_float(
+        "camera_movement", "intensity", default=1.0,
+        aliases={"none": 0.0, "static": 0.0, "parado": 0.0,
+                 "subtle": 0.5, "suave": 0.5, "low": 0.5,
+                 "normal": 1.0, "medium": 1.0, "médio": 1.0,
+                 "strong": 1.5, "high": 1.5, "forte": 1.5,
+                 "max": 2.0, "máximo": 2.0},
     )
 
-    movement_filter = _build_movement_filter(movement, narration_duration, w, h)
+    logger.info(
+        "Preparando clipe de fundo: {} | trecho {:.2f}s -> {:.2f}s | movimento={} (intensidade={:.2f}) | loop={}",
+        video_path.name, start, end, movement, intensity, looped,
+    )
+
+    movement_filter = _build_movement_filter(movement, narration_duration, w, h, intensity)
     color_filter = _build_color_filter(cfg)
     vf = f"{movement_filter},{color_filter},scale={w}:{h},fps={fps},format={pix_fmt},setsar=1"
 
     args: list[str] = []
     if looped:
         # vídeo mais curto que a narração: repete em loop até cobrir a duração
-        args += ["-stream_loop", "-1"]
-    args += ["-i", str(video_path)]
-    if not looped:
-        args += ["-ss", f"{start:.3f}"]
+        args += ["-stream_loop", "-1", "-i", str(video_path)]
+    else:
+        # -ss antes de -i: seek direto no arquivo (rápido mesmo em
+        # vídeos longos) sem decodificar tudo até o ponto de corte
+        args += ["-ss", f"{start:.3f}", "-i", str(video_path)]
     args += ["-t", f"{narration_duration:.3f}"]
     args += [
         "-vf", vf,

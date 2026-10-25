@@ -9,6 +9,7 @@ loudnorm em modo de medição, padrão EBU R128) usando ffprobe/ffmpeg.
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 from dataclasses import dataclass
@@ -40,14 +41,19 @@ def _run_ffprobe(path: Path) -> dict:
 
 def _measure_loudness(path: Path) -> dict:
     """Usa o filtro loudnorm do ffmpeg em modo de análise (print_format json)
-    para medir loudness integrada, true peak e loudness range, seguindo o
-    padrão EBU R128."""
+    para medir loudness integrada, true peak, loudness range, limiar e
+    offset, seguindo o padrão EBU R128. Esses valores alimentam a
+    normalização linear aplicada depois na mixagem (ETAPA 9)."""
     cmd = [
-        "ffmpeg", "-i", str(path), "-af",
+        "ffmpeg", "-nostdin", "-i", str(path), "-af",
         "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
         "-f", "null", "-",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        logger.warning("Análise de loudness de {} excedeu 600s; seguindo sem normalizar.", path)
+        return {}
     stderr = result.stderr
 
     match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", stderr, re.DOTALL)
@@ -56,10 +62,21 @@ def _measure_loudness(path: Path) -> dict:
         return {}
     try:
         data = json.loads(match.group(0))
+
+        def _num(key: str) -> float | None:
+            raw = str(data.get(key, "nan"))
+            try:
+                value = float(raw)
+            except ValueError:
+                return None
+            return value if math.isfinite(value) else None
+
         return {
-            "integrated_loudness": float(data.get("input_i", "nan")),
-            "true_peak": float(data.get("input_tp", "nan")),
-            "loudness_range": float(data.get("input_lra", "nan")),
+            "integrated_loudness": _num("input_i"),
+            "true_peak": _num("input_tp"),
+            "loudness_range": _num("input_lra"),
+            "threshold": _num("input_thresh"),
+            "target_offset": _num("target_offset"),
         }
     except (json.JSONDecodeError, ValueError):
         return {}
@@ -67,9 +84,19 @@ def _measure_loudness(path: Path) -> dict:
 
 def analyze_narration(path: Path) -> AudioInfo:
     logger.info("Analisando narração: {}", path)
-    probe = _run_ffprobe(path)
+    try:
+        probe = _run_ffprobe(path)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError,
+            json.JSONDecodeError) as e:
+        raise RuntimeError(
+            f"Não foi possível ler os metadados da narração {path.name}: {e}"
+        ) from e
     fmt = probe.get("format", {})
     duration = float(fmt.get("duration", 0.0) or 0.0)
+    if duration <= 0:
+        raise RuntimeError(
+            f"Duração da narração {path.name} é 0s: arquivo vazio ou corrompido."
+        )
     bitrate = int(fmt.get("bit_rate", 0) or 0)
 
     sample_rate = 0

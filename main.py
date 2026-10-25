@@ -8,6 +8,7 @@ Uso:
     python main.py watch                 # ETAPA 1: monitora input/audio/ continuamente
     python main.py run <arquivo.wav>      # processa um único áudio manualmente
     python main.py run-text <arquivo.txt> # processa um texto (TTS -> vídeo)
+    python main.py generate "<tópico>"    # gera roteiro via LLM (seção llm.*) em input/textos/
     python main.py scan                   # (re)popula o banco a partir dos assets em disco
 """
 
@@ -40,6 +41,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_text_parser = subparsers.add_parser("run-text", help="Processa um arquivo de texto (.txt) -> TTS -> vídeo")
     run_text_parser.add_argument("text", help="Caminho para o arquivo .txt com o texto")
 
+    gen_parser = subparsers.add_parser(
+        "generate", help="Gera um roteiro .txt com LLM (seção llm.*) a partir de um tópico")
+    gen_parser.add_argument("topic", help="Assunto do roteiro, ex.: \"como economizar energia\"")
+    gen_parser.add_argument("--out", default=None,
+                            help="Caminho do .txt de saída (padrão: input/textos/<tópico>.txt)")
+
     return parser
 
 
@@ -49,6 +56,18 @@ def main() -> int:
 
     cfg = load_config(args.config)
     setup_logging(cfg)
+
+    if args.command == "generate":
+        from core.script_generator import ScriptGenerationError, generate_script
+
+        try:
+            out = generate_script(cfg, args.topic,
+                                  Path(args.out) if args.out else None)
+        except ScriptGenerationError as e:
+            logger.error("Falha ao gerar roteiro: {}", e)
+            return 1
+        print(out)
+        return 0
 
     db = Database(cfg)
 

@@ -31,11 +31,24 @@ from core.video_processor import plan_segment_durations, prepare_background_sequ
 
 
 def _next_project_id(cfg: Config) -> str:
+    """ID único do projeto (data + sequencial). Pula sequenciais já
+    usados no dia para nunca sobrescrever relatório/vídeo de outro
+    render (o incremento simples quebrava quando um projeto falhava no
+    meio e deixava logs parciais)."""
     today = datetime.now().strftime("%Y_%m_%d")
     logs_dir = cfg.paths["logs"]
-    existing = list(logs_dir.glob(f"{today}_*.log.json"))
-    seq = len(existing) + 1
-    return f"{today}_{seq:03d}"
+    output_dirs = [cfg.paths["output_videos"], cfg.paths["output_shorts"]]
+    seq = 1
+    while True:
+        candidate = f"{today}_{seq:03d}"
+        taken = bool(list(logs_dir.glob(f"{candidate}.log.json"))) or any(
+            d.exists() and (d / f"{candidate}.mp4").exists() for d in output_dirs
+        )
+        if not taken:
+            return candidate
+        seq += 1
+        if seq > 999:
+            return f"{today}_{int(datetime.now().timestamp()):06d}"
 
 
 def run_pipeline_for_audio(cfg: Config, db: Database, audio_path: Path) -> Path | None:
@@ -70,8 +83,29 @@ def run_pipeline_for_audio(cfg: Config, db: Database, audio_path: Path) -> Path 
         # ETAPA 4 - Seleção do(s) vídeo(s) de fundo
         orientation = "vertical" if h > w else ("horizontal" if w > h else None)
         segment_durations = plan_segment_durations(cfg, narration_duration)
+
+        # Limita o nº de trechos ao que a biblioteca suporta: com menos
+        # vídeos distintos disponíveis que trechos planejados, os
+        # excedentes são fundidos (evita repetir o mesmo clipe colado).
+        available_count = db.count_available_videos(
+            classification.categories, orientation=orientation,
+        )
+        if available_count >= 1 and len(segment_durations) > available_count:
+            logger.info(
+                "Biblioteca tem {} vídeo(s) distintos para {} trecho(s); fundindo trechos.",
+                available_count, len(segment_durations),
+            )
+            while len(segment_durations) > available_count:
+                i = min(
+                    range(len(segment_durations) - 1),
+                    key=lambda k: segment_durations[k] + segment_durations[k + 1],
+                )
+                segment_durations[i] += segment_durations[i + 1]
+                del segment_durations[i + 1]
+
         video_assets = select_background_videos(
-            db, classification.categories, len(segment_durations), orientation=orientation,
+            cfg, db, classification.categories, len(segment_durations),
+            orientation=orientation, durations=segment_durations,
         )
         video_paths = [cfg.project_root / v.arquivo for v in video_assets]
         video_list_str = ", ".join(v.arquivo for v in video_assets)
@@ -81,8 +115,9 @@ def run_pipeline_for_audio(cfg: Config, db: Database, audio_path: Path) -> Path 
         silent_clip_path = cache_dir / "background_processed.mp4"
         prepare_background_sequence(cfg, video_paths, segment_durations, cache_dir, silent_clip_path)
 
-        # ETAPA 9 - Música ambiente + mixagem
-        music_asset = select_ambient_music(db, min_duration=0.0)
+        # ETAPA 9 - Música ambiente + mixagem (prefere trilha longa o
+        # bastante para não fazer loop audível na narração)
+        music_asset = select_ambient_music(cfg, db, min_duration=narration_duration)
         music_source_path = (
             cfg.project_root / music_asset.arquivo if music_asset else None
         )
@@ -90,7 +125,8 @@ def run_pipeline_for_audio(cfg: Config, db: Database, audio_path: Path) -> Path 
 
         mixed_audio_path = cache_dir / "audio_mixed.wav"
         mix_narration_with_music(
-            cfg, audio_path, music_source_path, narration_duration, mixed_audio_path
+            cfg, audio_path, music_source_path, narration_duration, mixed_audio_path,
+            narration_info=audio_info,
         )
 
         # ETAPA 11 - Overlay do canal
